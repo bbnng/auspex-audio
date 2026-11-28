@@ -1,4 +1,4 @@
-Auspex Audio 1.0.0
+Auspex Audio 1.0.1
 ==================
 
 Modern 3D sound engine replacement for Vampire: The Masquerade - Bloodlines, powered by

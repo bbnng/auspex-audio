@@ -25,6 +25,8 @@ struct ChannelSnapshot {
     bool  own = false;          // emitted by the view entity (the player)
     bool  player = false;       // emitted by the player's character, whatever the view is
     float duck = 1.0f;          // how loud everything but voices is right now
+    float music_volume = 1.0f;  // snd_musicvolume (0..1, relative to master volume; e.g. UP12 Options Console)
+    float effects_volume = 1.0f; // snd_effectsvolume (0..1, relative to master volume; e.g. UP12 Options Console)
     float mouth_height = 0.0f;  // a talking character: how far above its origin (the feet) the mouth is, inches
     bool  has_facing = false;   // a character whose angles are known
     float facing[3] = {};       // where it faces (Source axes)
@@ -79,6 +81,8 @@ constexpr float kMaxGain2D = 1.26f;
 // Volume of the loudest rain of the game's streets (sm_hub_1: 40 %).
 constexpr float kFullRain = 0.40f;
 
+// Music tracks under "music/" (after optional Source prefix chars and "sound/"), matching UP12 Options Console.
+bool is_music_sound(const char* name);
 // Outdoor rain and thunder by file name ("area/santa_monica/rain_light_loop.wav", "environmental/weather/rain1.wav").
 // Whole words only (no "train", "drain", "brain"), never music, dialogue, interface sounds, or rain that drips in sewers.
 bool is_weather_sound(const char* name);

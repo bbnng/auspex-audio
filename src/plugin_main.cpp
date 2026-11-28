@@ -20,7 +20,7 @@
 
 BLSE_PLUGIN_INFO(
     "auspex_audio",
-    "1.0.0",
+    "1.0.1",
     "bigbannng",
     "Auspex Audio - Steam Audio + miniaudio 3D spatialization, HRTF, and BSP raytraced acoustics",
     "0.7",

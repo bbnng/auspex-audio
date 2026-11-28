@@ -177,6 +177,8 @@ float g_up_r[2048];
 GainModel g_gain_model;
 ChannelTweaks g_tweaks;
 float g_volume = 1.0f;
+float g_music_volume = 1.0f;
+float g_effects_volume = 1.0f;
 uint32_t g_frame_counter = 0;
 
 // Watches the DirectSound clock: without it the game plays no sound at all, here or otherwise.
@@ -423,6 +425,8 @@ void read_channel_snapshot(const void* ch, ChannelSnapshot& c) {
     c.own = g_view_entity_known && c.entnum == read_at<int>(g_engine_base, kRvaViewEntity);
     c.player = c.entnum == kPlayerEntity;
     c.duck = duck_scale();
+    c.music_volume = g_music_volume;
+    c.effects_volume = g_effects_volume;
     if (!c.own && (c.is_voice || (c.entchannel == kChanVoice && is_bark_sound(c.name)))) {
         float angles[3] = {}; // the body stands upright, whatever its entity's pitch and roll say
         c.mouth_height = read_talker(c.entnum, c.origin, &angles[1], &c.has_facing);
@@ -448,6 +452,10 @@ float read_cvar(const char* name, float fallback) {
 
 void poll_cvars() {
     g_volume = read_cvar("volume", 1.0f);
+    // Unofficial Patch 12 Options Console (options-console.vtm) adds Music/Sound sliders via these cvars and applies
+    // them inside MIX_ScaleChannelVolume (0x135F80), which Auspex Audio's Mix* hooks bypass.
+    g_music_volume = std::clamp(read_cvar("snd_musicvolume", 1.0f), 0.0f, 1.0f);
+    g_effects_volume = std::clamp(read_cvar("snd_effectsvolume", 1.0f), 0.0f, 1.0f);
     if ((g_frame_counter & 63u) != 0u && g_frame_counter != 0u) return;
     const GainModel def{};
     g_gain_model.snd_gain   = std::max(0.0f, read_cvar("snd_gain", def.snd_gain));
@@ -983,6 +991,8 @@ bool reinstall_engine_sound_hooks(const BLSE_HostAPI* host) {
     g_hooks_installed = false;
     g_in_paint_chunk = false;
     g_frame_counter = 0;
+    g_music_volume = 1.0f;
+    g_effects_volume = 1.0f;
     g_clock = {};
     for (CaptureDedup& d : g_dedup) d = CaptureDedup{};
     for (UpsampleHistory& h : g_upsample) h = UpsampleHistory{};

@@ -73,6 +73,29 @@ void hash_voice(const char* name, std::uint32_t& file, std::uint32_t& folder) {
 
 } // namespace
 
+bool is_music_sound(const char* name) {
+    if (!name) return false;
+    // Match Unofficial Patch 12's options-console.vtm path classifier: normalize slashes and case, strip up to two
+    // Source sound-prefix chars, leading slashes and an optional "sound/" prefix, then require "music/<path>" with
+    // clean non-empty path segments (no ".", "..", empty segments or trailing slash).
+    const char* p = name;
+    for (int i = 0; i < 2 && *p && std::strchr("*?!#@><^)}", *p); ++i) ++p;
+    while (*p == '/' || *p == '\\') ++p;
+    if (starts_with_ci(p, "sound/")) p += 6;
+    if (!starts_with_ci(p, "music/")) return false;
+    p += 6;
+    if (*p == '\0') return false;
+    while (true) {
+        const char* seg = p;
+        while (*p && *p != '/' && *p != '\\') ++p;
+        const std::size_t len = static_cast<std::size_t>(p - seg);
+        if (len == 0) return false;
+        if ((len == 1 && seg[0] == '.') || (len == 2 && seg[0] == '.' && seg[1] == '.')) return false;
+        if (*p == '\0') return true;
+        ++p; // skip slash; a trailing slash produces len == 0 on the next iteration
+    }
+}
+
 bool is_rain_sound(const char* name) {
     name = bare_name(name);
     static const char* const kNever[] = { "music/", "character/", "interface/", "ui/", "radio/", "vo/" };
@@ -206,6 +229,10 @@ ChannelDescriptor describe_channel(const ChannelSnapshot& c, const GainModel& mo
         d.master_gain = sum > 0 ? std::min(kMaxGain2D, static_cast<float>(sum + 1) / 255.0f) : 0.0f;
     }
     if (!c.is_voice && !c.no_duck) d.master_gain *= std::clamp(c.duck, 0.0f, 1.0f);
+    // Relative category gain (snd_musicvolume / snd_effectsvolume, e.g. Unofficial Patch 12 Options Console).
+    // loop_master stays unscaled so looping music keeps mixing while muted and fades back in smoothly if turned up.
+    const float category_gain = is_music_sound(c.name) ? c.music_volume : c.effects_volume;
+    if (std::isfinite(category_gain)) d.master_gain *= std::clamp(category_gain, 0.0f, 1.0f);
 
     // Conversations: CDialog plays the NPC's line as a stream with "skip collide" (0x102C0520 / 0x102C04B0 in
     // vampire.dll). The engine never obscures those lines. Ray tracing them muffled the voice whenever the dialogue

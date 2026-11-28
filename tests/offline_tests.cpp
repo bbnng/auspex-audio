@@ -1794,6 +1794,35 @@ void test_weather() {
     check(worst < 1.0, "Even a teleport under a roof fades (0.4 s)");
     eng->unload_scene();
     check(eng->sky_exposure() == 1.0f, "Level shutdown forgets the roof");
+
+    // Small awning and parking garage facing buildings across the street (so shallow upward rays hit the opposite
+    // building instead of sky, just like Santa Monica). Rain must stay close to outdoor level under a small awning
+    // and fade gradually with distance inside a parking entrance rather than muffling equally everywhere under a roof.
+    {
+        sa::AcousticMeshData city = street_mesh();
+        // Tall building across the street (x = -500..-300, 12 m across from the garage mouth at x = 100).
+        add_box(city, -600, -300, -900, 900, 0, 700);
+        // Small shop awning on the building wall at y = 500..700: wall at x = 100..200, thin overhang x = 36..100 (1.6 m deep, z = 100..110).
+        add_box(city, 100, 260, 450, 750, 0, 500);
+        add_box(city, 36, 100, 500, 700, 100, 110);
+
+        sa::SkyProbe cp;
+        cp.build(city);
+        const float e_out    = cp.exposure(sa::source_pos_to_ipl(-120.0f, 0.0f, 64.0f), nullptr, 0);
+        const float e_awning = cp.exposure(sa::source_pos_to_ipl(72.0f, 600.0f, 64.0f), nullptr, 0);
+        const float e_near   = cp.exposure(sa::source_pos_to_ipl(140.0f, 0.0f, 64.0f), nullptr, 0); // 1 m inside parking exit
+        const float e_mid    = cp.exposure(sa::source_pos_to_ipl(280.0f, 0.0f, 64.0f), nullptr, 0); // 4.6 m inside
+        const float e_far    = cp.exposure(sa::source_pos_to_ipl(480.0f, 0.0f, 64.0f), nullptr, 0); // 9.6 m inside
+        const float e_back   = cp.exposure(sa::source_pos_to_ipl(760.0f, 0.0f, 64.0f), nullptr, 0); // 16.8 m deep inside
+        const float e_closed = cp.exposure(sa::source_pos_to_ipl(140.0f, 0.0f, 64.0f), &shutter, 1);
+        std::printf("    city sky exposure: street %.2f | small awning %.2f | parking 1m %.2f | 4.6m %.2f | 9.6m %.2f | 16.8m %.2f | shutter %.2f\n",
+                    e_out, e_awning, e_near, e_mid, e_far, e_back, e_closed);
+        check(e_out > 0.55f, "Open street between buildings sees full rain");
+        check(e_awning > 0.35f && e_awning < e_out, "Under a small awning right next to the rain stays largely open");
+        check(e_near > 0.20f && e_near > e_mid + 0.08f, "Right near the parking exit is clearly louder than deeper inside");
+        check(e_mid > e_far + 0.03f && e_far > e_back, "Walking deeper into parking fades rain gradually with distance");
+        check(e_back < 0.02f && e_closed < 0.01f, "Deep inside parking and behind a closed shutter stay fully sheltered");
+    }
 }
 
 void test_device() {
@@ -4019,6 +4048,169 @@ void test_audit_fixes() {
     }
 }
 
+void test_music_and_effects_volume() {
+    std::printf("=== Test 43: Music and Sound volume sliders (snd_musicvolume / snd_effectsvolume) ===\n");
+    check(sa::is_music_sound("music/Dangerous_Places.mp3"), "music/ path is music");
+    check(sa::is_music_sound("Music\\Licenced\\Tiamat - Cain.mp3"), "mixed case and backslashes are music");
+    check(sa::is_music_sound("*music/music/Confession_music_1.wav"), "single Source prefix before music/ is music");
+    check(sa::is_music_sound("#*music/licensed/Vesuvius.mp3"), "two Source prefixes before music/ are music");
+    check(sa::is_music_sound("sound/music/santa_monica/theme.mp3"), "sound/music/ is music");
+    check(sa::is_music_sound("///music/title.mp3"), "leading slashes before music/ are stripped");
+    check(!sa::is_music_sound(nullptr) && !sa::is_music_sound(""), "null and empty are not music");
+    check(!sa::is_music_sound("music/") && !sa::is_music_sound("music/a/"), "trailing slash is not music");
+    check(!sa::is_music_sound("music/.") && !sa::is_music_sound("music/..") && !sa::is_music_sound("music/a/../b.mp3"),
+          "dot segments are rejected");
+    check(!sa::is_music_sound("music//a.mp3"), "empty segments are rejected");
+    check(!sa::is_music_sound("musicbox/song.wav"), "musicbox/ is not music/");
+    check(!sa::is_music_sound("area/santa_monica/rain_light_loop.wav"), "rain ambient is not music");
+    check(!sa::is_music_sound("character/dlg/santa_monica/jeanette/line1.mp3"), "dialogue is not music");
+
+    sa::ChannelSnapshot music2d{};
+    music2d.name = "*music/Dangerous_Places.mp3";
+    music2d.volumes[0] = 127;
+    music2d.volumes[1] = 127;
+    music2d.master_vol = 255;
+    music2d.dry = true;
+    const float full_music = sa::describe_channel(music2d).master_gain;
+    music2d.music_volume = 0.0f;
+    music2d.effects_volume = 1.0f;
+    check(sa::describe_channel(music2d).master_gain == 0.0f, "2D music is silent when snd_musicvolume is 0");
+    music2d.music_volume = 0.5f;
+    check(std::fabs(sa::describe_channel(music2d).master_gain - full_music * 0.5f) < 1e-4f,
+          "2D music scales linearly with snd_musicvolume");
+    music2d.music_volume = 1.0f;
+    music2d.effects_volume = 0.0f;
+    check(std::fabs(sa::describe_channel(music2d).master_gain - full_music) < 1e-4f,
+          "2D music ignores snd_effectsvolume");
+
+    sa::ChannelSnapshot sfx2d{};
+    sfx2d.name = "interface/menu_click.wav";
+    sfx2d.volumes[0] = 127;
+    sfx2d.volumes[1] = 127;
+    sfx2d.master_vol = 255;
+    const float full_sfx = sa::describe_channel(sfx2d).master_gain;
+    sfx2d.music_volume = 0.0f;
+    sfx2d.effects_volume = 1.0f;
+    check(std::fabs(sa::describe_channel(sfx2d).master_gain - full_sfx) < 1e-4f,
+          "2D non-music ignores snd_musicvolume");
+    sfx2d.effects_volume = 0.0f;
+    check(sa::describe_channel(sfx2d).master_gain == 0.0f, "2D non-music is silent when snd_effectsvolume is 0");
+
+    // 3D club music speaker: muted cleanly when Music = 0, while loop_master stays intact so it resumes if raised.
+    sa::ChannelSnapshot club3d{};
+    club3d.name = "Music\\Licenced\\Tiamat - Cain.mp3";
+    club3d.origin[0] = 120.0f;
+    club3d.dist_mult = dist_mult_for(75, 50);
+    club3d.master_vol = 204;
+    club3d.is_looped = true;
+    club3d.music_volume = 0.0f;
+    const sa::ChannelDescriptor club_muted = sa::describe_channel(club3d);
+    check(club_muted.spatial_3d && club_muted.master_gain == 0.0f && club_muted.loop_master > 0.7f,
+          "3D looping club music silences with Music=0 while keeping loop_master alive");
+
+    // Out-of-range / NaN category gains are clamped or ignored.
+    music2d.music_volume = -0.5f;
+    check(sa::describe_channel(music2d).master_gain == 0.0f, "Negative snd_musicvolume clamps to 0");
+    music2d.music_volume = 2.0f;
+    check(std::fabs(sa::describe_channel(music2d).master_gain - full_music) < 1e-4f, "snd_musicvolume above 1 clamps to 1");
+    music2d.music_volume = std::numeric_limits<float>::quiet_NaN();
+    check(std::fabs(sa::describe_channel(music2d).master_gain - full_music) < 1e-4f, "NaN snd_musicvolume is ignored");
+
+    // End-to-end audio rendering: turning Music to 0 silences music while non-music plays on, and raising it brings music back.
+    {
+        auto eng = make_engine();
+        publish(*eng, Camera());
+        sa::ChannelSnapshot ms{};
+        ms.name = "music/Dangerous_Places.mp3";
+        ms.volumes[0] = 127;
+        ms.volumes[1] = 127;
+        ms.master_vol = 255;
+        ms.dry = true;
+        ms.mixer = 10;
+        sa::ChannelSnapshot ss{};
+        ss.name = "weapons/pistol_fire.wav";
+        ss.volumes[0] = 127;
+        ss.volumes[1] = 127;
+        ss.master_vol = 255;
+        ss.mixer = 11;
+
+        Tone mtone, stone;
+        mtone.freq = 220.0f;
+        stone.freq = 660.0f;
+        sa::ChannelDescriptor md = sa::describe_channel(ms);
+        sa::ChannelDescriptor sd = sa::describe_channel(ss);
+        feed(*eng, 0, md, mtone, 8820);
+        render(*eng, 4096);
+        const Energy loud_music = render(*eng, 2048);
+        check(loud_music.l + loud_music.r > 1.0, "2D music plays at full volume initially");
+
+        ms.music_volume = 0.0f;
+        md = sa::describe_channel(ms);
+        eng->update_channel(0, md);
+        feed(*eng, 0, md, mtone, 8820);
+        render(*eng, 4096); // ramp down
+        float peak = 0.0f;
+        render(*eng, 2048, &peak);
+        check(peak < 1e-4f, "Live update to snd_musicvolume=0 silences playing 2D music");
+
+        // Non-music continues unaffected while music is muted.
+        ss.music_volume = 0.0f;
+        sd = sa::describe_channel(ss);
+        feed(*eng, 1, sd, stone, 8820);
+        render(*eng, 4096);
+        const Energy sfx_only = render(*eng, 2048);
+        check(sfx_only.l + sfx_only.r > 1.0, "Non-music still plays at full volume while snd_musicvolume=0");
+
+        // Raising Music back brings the track smoothly back.
+        ms.music_volume = 1.0f;
+        md = sa::describe_channel(ms);
+        eng->update_channel(0, md);
+        eng->notify_channel_freed(1);
+        feed(*eng, 0, md, mtone, 13230);
+        render(*eng, 8192);
+        const Energy restored = render(*eng, 2048);
+        check(restored.l + restored.r > 1.0, "Raising snd_musicvolume back to 1 restores the music");
+    }
+
+    // 3D club music in a reverb room: turning Music to 0 silences both direct sound and reverb.
+    {
+        auto eng = make_engine(/*reverb=*/true);
+        sa::AcousticMeshData mesh;
+        mesh.materials = sa::default_acoustic_materials();
+        mesh.map_name = "test_music_room";
+        add_room(mesh);
+        std::string summary;
+        check(eng->load_scene(mesh, summary), "Room loaded for 3D music mute test");
+        publish(*eng, Camera());
+        sa::ChannelSnapshot cs{};
+        cs.name = "music/licenced/asylum.mp3";
+        cs.origin[0] = 100.0f;
+        cs.dist_mult = dist_mult_for(75, 50);
+        cs.master_vol = 255;
+        cs.is_looped = true;
+        cs.mixer = 20;
+        Tone tone;
+        sa::ChannelDescriptor cd = sa::describe_channel(cs);
+        feed(*eng, 2, cd, tone, 8820);
+        eng->run_simulation_sync();
+        render(*eng, 4096);
+        const Energy before = render(*eng, 2048);
+        check(before.l + before.r > 0.1, "3D club music plays before muting");
+
+        cs.music_volume = 0.0f;
+        cd = sa::describe_channel(cs);
+        eng->update_channel(2, cd);
+        for (int k = 0; k < 20; ++k) {
+            feed(*eng, 2, cd, tone, 4410);
+            render(*eng, 4410); // let direct ramp and room reverb tail finish
+        }
+        float peak = 0.0f;
+        render(*eng, 2048, &peak);
+        check(peak < 1e-4f, "3D club music and its room reverb go completely silent at snd_musicvolume=0");
+        eng->unload_scene();
+    }
+}
+
 void test_real_maps() {
     std::printf("=== Test 41: The game's own maps (skipped without --maps) ===\n");
     if (g_maps_dir.empty()) return;
@@ -4125,6 +4317,7 @@ int wmain(int argc, wchar_t** argv) {
     test_voice_levels();
     test_step_ambients();
     test_audit_fixes();
+    test_music_and_effects_volume();
     test_real_maps();
     std::printf("\n=== Summary: %d checks, %d failure(s) ===\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;

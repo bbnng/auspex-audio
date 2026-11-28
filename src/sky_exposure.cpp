@@ -161,7 +161,27 @@ void SkyProbe::build(const AcousticMeshData& mesh) {
 
 float SkyProbe::exposure(IPLVector3 listener, const Mover* movers, std::size_t mover_count) const {
     if (!has_sky_) return 1.0f;
-    // Straight up and three rings. Rain is heard from all around, but mostly from where it falls.
+
+    // Closest hit against both static world brushes and dynamic brush entities (doors, garage shutters).
+    const auto trace_solid = [&](const IPLVector3& o, const IPLVector3& d, float max_dist, bool& hit_sky) -> float {
+        hit_sky = false;
+        float t = bvh_.closest_hit(o, d, max_dist, hit_sky);
+        const float limit = t >= 0.0f ? t : max_dist;
+        for (std::size_t m = 0; m < mover_count; ++m) {
+            if (!movers[m].bvh) continue;
+            bool ignored = false;
+            const float mt = movers[m].bvh->closest_hit(
+                inverse_transform_point(movers[m].local_to_world, o),
+                inverse_transform_dir(movers[m].local_to_world, d), limit, ignored);
+            if (mt >= 0.0f && (t < 0.0f || mt < t)) {
+                t = mt;
+                hit_sky = false;
+            }
+        }
+        return t;
+    };
+
+    // 1. Direct overhead sky: straight up and three rings.
     static const struct { float elevation; int rays; float weight; } kRings[] = {
         { 90.0f, 1, 3.0f }, { 70.0f, 8, 1.0f }, { 45.0f, 12, 0.75f }, { 22.0f, 12, 0.4f },
     };
@@ -172,21 +192,77 @@ float SkyProbe::exposure(IPLVector3 listener, const Mover* movers, std::size_t m
             const float az = 6.2831853f * (static_cast<float>(k) + 0.5f) / static_cast<float>(ring.rays);
             const IPLVector3 dir{ std::cos(el) * std::cos(az), std::sin(el), std::cos(el) * std::sin(az) };
             bool sky = false;
-            const float t = bvh_.closest_hit(listener, dir, kMaxRay, sky);
+            const float t = trace_solid(listener, dir, kMaxRay, sky);
             if (t < 0.0f) continue; // left the map: says nothing
             total += ring.weight;
-            if (!sky) continue;
-            bool blocked = false;
-            for (std::size_t m = 0; m < mover_count && !blocked; ++m) {
-                bool ignored = false;
-                blocked = movers[m].bvh && movers[m].bvh->closest_hit(
-                    inverse_transform_point(movers[m].local_to_world, listener),
-                    inverse_transform_dir(movers[m].local_to_world, dir), t, ignored) >= 0.0f;
-            }
-            if (!blocked) open += ring.weight;
+            if (sky) open += ring.weight;
         }
     }
-    return total > 0.0f ? open / total : 1.0f;
+    const float direct = total > 0.0f ? open / total : 1.0f;
+
+    // 2. Nearby openings to the rain: under a small awning or right inside a parking garage exit, overhead sky is
+    // blocked (and buildings across the street block shallow upward rays), yet rain falls openly a meter or two away
+    // through the opening. Probe horizontally (and slightly upward for ramps) to find the nearest point in each
+    // direction with open sky directly above it, and weight by opening width and distance.
+    constexpr float kPortalWeight  = 0.85f;
+    if (direct >= kPortalWeight) return direct; // horizontal portals cannot raise exposure further
+
+    constexpr int   kPortalRays    = 16;
+    constexpr float kMaxPortalDist = 16.0f;
+    constexpr float kPortalRefDist = 5.5f;
+    constexpr float kPortalPower   = 1.4f;
+    static const float kProbeDists[] = { 0.6f, 1.2f, 2.0f, 3.0f, 4.5f, 6.5f, 9.5f, 13.0f, 15.5f };
+    static const float kElevations[] = { 0.0f, 15.0f * 0.017453293f }; // eye level + slight tilt for sloping ramps
+
+    const auto sky_above = [&](const IPLVector3& p) -> bool {
+        bool sky = false;
+        const float t = trace_solid(p, IPLVector3{ 0.0f, 1.0f, 0.0f }, kMaxRay, sky);
+        return t >= 0.0f && sky;
+    };
+
+    const auto nearest_rain = [&](const IPLVector3& dir) -> float {
+        bool hit_sky = false;
+        const float t = trace_solid(listener, dir, kMaxPortalDist, hit_sky);
+        const float clear_dist = (t >= 0.0f && !hit_sky) ? t : kMaxPortalDist;
+        const float max_probe = clear_dist - 0.2f;
+        if (max_probe < 0.25f) return -1.0f;
+        const auto point_at = [&](float d) {
+            return IPLVector3{ listener.x + dir.x * d, listener.y + dir.y * d, listener.z + dir.z * d };
+        };
+        float prev = 0.0f;
+        for (float d : kProbeDists) {
+            if (d > max_probe) break;
+            if (sky_above(point_at(d))) {
+                const float mid = 0.5f * (prev + d);
+                return (mid >= 0.25f && sky_above(point_at(mid))) ? mid : d;
+            }
+            prev = d;
+        }
+        if (max_probe > prev + 0.25f && sky_above(point_at(max_probe))) {
+            const float mid = 0.5f * (prev + max_probe);
+            return (mid >= 0.25f && sky_above(point_at(mid))) ? mid : max_probe;
+        }
+        return -1.0f;
+    };
+
+    float portal = 0.0f;
+    for (int k = 0; k < kPortalRays; ++k) {
+        const float az = 6.2831853f * (static_cast<float>(k) + 0.5f) / static_cast<float>(kPortalRays);
+        const float ca = std::cos(az), sa_az = std::sin(az);
+        float best_d = -1.0f;
+        for (float el : kElevations) {
+            const float ce = std::cos(el), se = std::sin(el);
+            const float d = nearest_rain(IPLVector3{ ce * ca, se, ce * sa_az });
+            if (d >= 0.0f && (best_d < 0.0f || d < best_d)) best_d = d;
+            if (best_d >= 0.0f && best_d <= 1.2f) break; // already right outside
+        }
+        if (best_d >= 0.0f && best_d < kMaxPortalDist) {
+            const float fade = 1.0f - best_d / kMaxPortalDist;
+            portal += fade / (1.0f + std::pow(best_d / kPortalRefDist, kPortalPower));
+        }
+    }
+    portal /= static_cast<float>(kPortalRays);
+    return std::max(direct, kPortalWeight * portal);
 }
 
 // How far a point inside solid world brushes is from where it comes out of them in this direction; negative: too far.
